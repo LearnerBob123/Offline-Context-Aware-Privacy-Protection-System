@@ -397,33 +397,17 @@ class RetailStrategy(BaseDecisionStrategy):
 # ======================================================================
 
 _STRATEGIES = {
-    "meeting":   MeetingStrategy,
-    "outdoor":   OutdoorStrategy,
-    "medical":   MedicalStrategy,
-    "classroom": ClassroomStrategy,
-    "traffic":   TrafficStrategy,
-    "retail":    RetailStrategy,
-    "default":   DefaultStrategy,
+    "meeting": MeetingStrategy,
+    "outdoor": OutdoorStrategy,
+    "default": DefaultStrategy,
 }
 
 
 def get_strategy(context_label: str) -> BaseDecisionStrategy:
     """Select a strategy based on the CLIP scene label."""
     label = context_label.lower()
-    if any(k in label for k in ("meeting", "presentation", "conference")):
+    if "meeting" in label or "presentation" in label:
         return MeetingStrategy()
-    if any(k in label for k in ("outdoor", "street", "park", "field", "garden", "pedestrian")):
+    if "outdoor" in label or "street" in label or "park" in label:
         return OutdoorStrategy()
-    if any(k in label for k in (
-        "hospital", "clinic", "medical", "doctor", "operating",
-        "nurse", "patient", "surgeon", "ward", "emergency room",
-        "healthcare", "examining",
-    )):
-        return MedicalStrategy()
-    if any(k in label for k in ("classroom", "lecture", "school", "university", "auditorium", "teacher", "professor", "student")):
-        return ClassroomStrategy()
-    if any(k in label for k in ("traffic", "road", "highway", "dashcam", "driving", "parking")):
-        return TrafficStrategy()
-    if any(k in label for k in ("store", "shop", "retail", "supermarket", "mall", "market", "customer", "shopper")):
-        return RetailStrategy()
     return DefaultStrategy()

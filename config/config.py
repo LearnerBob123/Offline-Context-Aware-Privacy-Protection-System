@@ -36,29 +36,10 @@ class PipelineConfig:
 
     # --- CLIP context prompts ---
     CONTEXT_PROMPTS: List[str] = field(default_factory=lambda: [
-        # ── Meeting / office ──────────────────────────────────────────────
-        "a meeting room with people sitting at a table",
-        "a conference room with a presentation on screen",
-        # ── Home ─────────────────────────────────────────────────────────
-        "a home environment with people",
-        # ── Outdoor / street ─────────────────────────────────────────────
-        "a public outdoor area with pedestrians",
-        "a street or road with people walking",
-        # ── Medical ──────────────────────────────────────────────────────
-        "a hospital ward with nurses and patients",
-        "a medical operating room with surgeons",
-        "a doctor examining a patient in a clinic",
-        "a nurse attending to a patient in a hospital bed",
-        "a medical emergency room with healthcare workers",
-        # ── Classroom ────────────────────────────────────────────────────
-        "a classroom with a teacher and students",
-        "a university lecture hall with professor and audience",
-        # ── Retail ───────────────────────────────────────────────────────
-        "a retail store with customers and staff",
-        "a supermarket or shopping mall with shoppers",
-        # ── Traffic ──────────────────────────────────────────────────────
-        "a traffic scene with cars and pedestrians",
-        "a dashcam view of a highway or road",
+        "a meeting room",
+        "a presentation",
+        "a home environment",
+        "a public outdoor area",
     ])
 
     # --- Temporal smoothing ---

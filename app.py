@@ -183,9 +183,6 @@ class _ProcessingJob:
     def start(self):
         self._thread.start()
 
-    def join(self, timeout: float = None):
-        self._thread.join(timeout=timeout)
-
     def _letterbox(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
         scale = min(self.PREVIEW_W / w, self.PREVIEW_H / h)
@@ -203,11 +200,16 @@ class _ProcessingJob:
             from engine.temporal import TemporalSmoother
             from utils.io import JSONLLogger
 
+            from engine.decision_engine import DecisionEngine
+            from utils.visualization import Renderer
+
             base_cfg = self.models["cfg"]
             ov = self.cfg_overrides
             cfg = PipelineConfig(
-                USE_YOLO=base_cfg.USE_YOLO, USE_VIT=base_cfg.USE_VIT,
-                USE_CLIP=base_cfg.USE_CLIP, USE_SALIENCY=base_cfg.USE_SALIENCY,
+                USE_YOLO=base_cfg.USE_YOLO,
+                USE_VIT=ov.get("use_vit", base_cfg.USE_VIT),
+                USE_CLIP=ov.get("use_clip", base_cfg.USE_CLIP),
+                USE_SALIENCY=ov.get("use_saliency", base_cfg.USE_SALIENCY),
                 BLUR_BACKGROUND_PEOPLE=ov.get("blur_people", True),
                 BLUR_SCREENS=ov.get("blur_screens", True),
                 BLUR_PLATES=ov.get("blur_plates", True),
@@ -216,13 +218,14 @@ class _ProcessingJob:
             )
 
             m = self.models
-            renderer   = m["renderer"]
+            # create per-job engine + renderer so blur/model settings are honoured
+            renderer   = Renderer(cfg)
             detector   = m["detector"]
-            embedder   = m.get("embedder")
-            context    = m.get("context")
-            saliency   = m.get("saliency")
+            embedder   = m.get("embedder") if cfg.USE_VIT else None
+            context    = m.get("context")  if cfg.USE_CLIP else None
+            saliency   = m.get("saliency") if cfg.USE_SALIENCY else None
             feat_eng   = m["feature_engine"]
-            dec_eng    = m["decision_engine"]
+            dec_eng    = DecisionEngine(cfg)   # fresh copy with this job's blur flags
             temporal   = TemporalSmoother(buffer_size=cfg.TEMPORAL_BUFFER_SIZE)
 
             reader = VideoReader(self.input_path)
@@ -276,20 +279,19 @@ class _ProcessingJob:
                 annotated = renderer.render(frame, frame_output)
                 writer.write(annotated)
 
-                # ── collect live context info for UI ──────────────────────
+                # ── populate live context info for UI panel ────────────────
                 dets = frame_output.get("detections", [])
                 blur_labels = [d["label"] for d in dets if d.get("role") == "blur"]
-                blur_counts = dict(Counter(blur_labels))
                 self.live_info = {
-                    "scene": _last_scene or {},
-                    "blur_counts": blur_counts,
+                    "scene":         _last_scene or {},
+                    "blur_counts":   dict(Counter(blur_labels)),
                     "total_blurred": len(blur_labels),
-                    "total_dets": len(dets),
-                    "strategy": next(
+                    "total_dets":    len(dets),
+                    "strategy":      next(
                         (d.get("decision_trace", {}).get("strategy", "—")
-                         for d in dets if d.get("decision_trace")), "—"
+                         for d in dets if d.get("decision_trace")),
+                        "—"
                     ),
-                    "all_scores": (_last_scene or {}).get("all_scores", []),
                 }
 
                 preview = self._letterbox(renderer.render_blur_only(frame, frame_output))
@@ -480,8 +482,11 @@ if run_clicked and tmp_input_path is not None:
     output_path = str(out_dir / f"{stem}_blurred.mp4")
     log_path    = str(out_dir / f"{stem}_log.jsonl")
 
-    cfg_ov = dict(blur_people=blur_people, blur_screens=blur_screens,
-                  blur_plates=blur_plates, blur_strength=blur_strength)
+    cfg_ov = dict(
+        blur_people=blur_people, blur_screens=blur_screens,
+        blur_plates=blur_plates, blur_strength=blur_strength,
+        use_vit=use_vit, use_clip=use_clip, use_saliency=use_saliency,
+    )
 
     job = _ProcessingJob(tmp_input_path, output_path, log_path, models, cfg_ov)
     job.start()
@@ -494,11 +499,7 @@ if run_clicked and tmp_input_path is not None:
     with prev_col:
         preview_ph = st.empty()
     with stat_col:
-        stat_ph    = st.empty()
-
-    # CLIP confidence expander — lives below the two-column block (full width)
-    with st.expander("🎯 CLIP Class Confidence Scores", expanded=False):
-        scores_ph = st.empty()
+        stat_ph = st.empty()
 
     prog = st.progress(0.0, text="Starting ...")
     t0   = time.perf_counter()
@@ -525,83 +526,65 @@ if run_clicked and tmp_input_path is not None:
         prog.progress(min(done / total, 1.0), text=f"Processing ... {done}/{total} frames")
 
         # ── live info panel ─────────────────────────────────────────────
-        info      = job.live_info
-        scene     = info.get("scene", {})
-        sc_label  = scene.get("label", "detecting\u2026")
-        sc_conf   = scene.get("confidence", 0.0)
-        strategy  = info.get("strategy", "\u2014")
-        blur_cnt  = info.get("blur_counts", {})
-        total_b   = info.get("total_blurred", 0)
-        total_d   = info.get("total_dets", 0)
-        all_scores = info.get("all_scores", [])
+        info     = job.live_info
+        scene    = info.get("scene", {})
+        sc_label = scene.get("label", "detecting\u2026")
+        sc_conf  = scene.get("confidence", 0.0)
+        strategy = info.get("strategy", "\u2014")
+        blur_cnt = info.get("blur_counts", {})
+        total_b  = info.get("total_blurred", 0)
+        total_d  = info.get("total_dets", 0)
 
-        # build blur breakdown rows
         blur_rows = "".join(
             f'<span class="pg-metric" style="margin:0.15rem">'
             f'{lbl.replace("_"," ").title()} &times;{cnt}</span>'
             for lbl, cnt in sorted(blur_cnt.items(), key=lambda x: -x[1])
-        ) or '<span style="color:#8b949e;font-size:0.85rem">none detected</span>'
+        ) or '<span style="color:#8b949e;font-size:0.85rem">none detected yet</span>'
 
         stat_ph.markdown(f"""
         <div class="pg-card" style="margin-top:0">
-        <h3>&#128202; Live Stats</h3>
-        <span class="pg-metric">{done}/{total}</span>
-        <span class="pg-metric">{fps_l:.1f} fps</span>
-        <span class="pg-metric">ETA&nbsp;{_fmt_time(eta)}</span>
-        <span class="pg-metric">&#9201;&nbsp;{_fmt_time(elapsed)}</span>
+          <h3>&#128202; Live Stats</h3>
+          <span class="pg-metric">{done}/{total}</span>
+          <span class="pg-metric">{fps_l:.1f}&nbsp;fps</span>
+          <span class="pg-metric">ETA&nbsp;{_fmt_time(eta)}</span>
+          <span class="pg-metric">&#9201;&nbsp;{_fmt_time(elapsed)}</span>
         </div>
         <div class="pg-card">
-        <h3>&#127916; CLIP Scene Context</h3>
-        <div style="font-size:1.05rem;color:#c9d1d9;margin-bottom:0.4rem">
+          <h3>&#127916; CLIP Scene Context</h3>
+          <div style="font-size:1.1rem;color:#c9d1d9;margin-bottom:0.5rem">
             <b style="color:#58a6ff">{sc_label.title()}</b>
             &nbsp;<span style="color:#8b949e;font-size:0.85rem">{sc_conf*100:.0f}% confidence</span>
-        </div>
-        <span class="pg-metric" style="font-size:0.8rem">Strategy:&nbsp;{strategy.replace('Strategy','')}</span>
+          </div>
+          <span class="pg-metric" style="font-size:0.78rem">Strategy:&nbsp;{strategy.replace("Strategy","").strip() or strategy}</span>
         </div>
         <div class="pg-card">
-        <h3>&#128683; Auto-Blurred Objects <span style="color:#f85149">&nbsp;{total_b}</span></h3>
-        <div style="line-height:2">{blur_rows}</div>
-        <div style="margin-top:0.5rem;color:#8b949e;font-size:0.8rem">
-            {total_d} total detections &middot; {total_b} blurred
-        </div>
+          <h3>&#128683; Auto-Blurred Objects&nbsp;<span style="color:#f85149">{total_b}</span></h3>
+          <div style="line-height:2.2">{blur_rows}</div>
+          <div style="margin-top:0.5rem;color:#8b949e;font-size:0.78rem">
+            {total_d} detections &middot; {total_b} blurred
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── CLIP confidence breakdown (inside expander) ──────────────────
-        if all_scores:
-            rows_html = "".join(
-                f"""<div style="margin-bottom:0.5rem">
-                  <div style="display:flex;justify-content:space-between;
-                              font-size:0.8rem;color:{'#58a6ff' if i==0 else '#c9d1d9'};
-                              margin-bottom:3px">
-                    <span>{'▶ ' if i==0 else ''}<b>{s['label'].title()}</b></span>
-                    <span style="color:{'#58a6ff' if i==0 else '#8b949e'};font-weight:{'700' if i==0 else '400'}">
-                      {s['confidence']*100:.1f}%
-                    </span>
-                  </div>
-                  <div style="background:#21262d;border-radius:4px;height:8px;overflow:hidden">
-                    <div style="width:{s['confidence']*100:.1f}%;height:100%;
-                                background:{'linear-gradient(90deg,#58a6ff,#79c0ff)' if i==0 else '#30363d'};
-                                border-radius:4px;transition:width 0.3s ease"></div>
-                  </div>
-                </div>"""
-                for i, s in enumerate(all_scores)
-            )
-            scores_ph.markdown(
-                f'<div style="padding:0.4rem 0">{rows_html}</div>',
-                unsafe_allow_html=True,
-            )
+    while not job.done:
+        time.sleep(0.1)
 
     prog.progress(1.0, text="Done!")
-    job.join()
 
     if job.error:
-        st.error(f"Processing failed: {job.error}")
+        st.error("Processing failed")
+        st.code(job.error, language="python")
     else:
-        st.success("Processing complete!")
+        elapsed_t = time.perf_counter() - t0
+        st.success(
+            f"Processed **{job.done_frames} frames** in {_fmt_time(elapsed_t)} "
+            f"({job.done_frames / max(elapsed_t, 1e-6):.1f} fps avg)"
+        )
+
+        st.markdown("### Output Files")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown('<div class="pg-card"><h3>Output Video</h3>', unsafe_allow_html=True)
+            st.markdown('<div class="pg-card"><h3>Blurred Video</h3>', unsafe_allow_html=True)
             if Path(output_path).exists():
                 with open(output_path, "rb") as f:
                     st.download_button("Download MP4", data=f.read(),

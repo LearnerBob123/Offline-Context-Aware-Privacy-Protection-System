@@ -9,7 +9,6 @@ Uses HuggingFace `transformers` CLIP (already installed) so no separate
 
 import torch
 import numpy as np
-import re
 from PIL import Image
 
 from core.base_module import BaseModule
@@ -72,7 +71,7 @@ class ContextModule(BaseModule):
     def classify_scene(self, frame: np.ndarray) -> dict:
         """
         Returns:
-            {"label": str, "confidence": float, "all_scores": [{"label": str, "confidence": float}, ...]}
+            {"label": str, "confidence": float}
         """
         pil = crop_and_convert(frame)
         img_inputs = self.processor(images=pil, return_tensors="pt").to(self.device)
@@ -84,24 +83,11 @@ class ContextModule(BaseModule):
         probs = similarity.softmax(dim=0).cpu().numpy()
         best = int(np.argmax(probs))
 
-        # Strip leading article ("a ", "an ", "the ") for cleaner labels
-        def _clean(raw: str) -> str:
-            return re.sub(r"^(a |an |the )", "", raw, flags=re.IGNORECASE).strip()
+        # Strip "a " / "an " prefix for cleaner labels
+        raw_label = self.config.CONTEXT_PROMPTS[best]
+        label = raw_label.lstrip("a ").lstrip("n ").strip()
 
-        all_scores = sorted(
-            [
-                {"label": _clean(self.config.CONTEXT_PROMPTS[i]),
-                 "confidence": round(float(probs[i]), 4)}
-                for i in range(len(self.config.CONTEXT_PROMPTS))
-            ],
-            key=lambda x: -x["confidence"],
-        )
-
-        return {
-            "label": _clean(self.config.CONTEXT_PROMPTS[best]),
-            "confidence": round(float(probs[best]), 4),
-            "all_scores": all_scores,
-        }
+        return {"label": label, "confidence": round(float(probs[best]), 4)}
 
     @torch.no_grad()
     def embed_image(self, frame: np.ndarray) -> list | None:
