@@ -33,6 +33,17 @@ class Renderer:
     # ------------------------------------------------------------------
     # Main annotated output
     # ------------------------------------------------------------------
+    def render_blur_only(self, frame: np.ndarray, frame_output: dict) -> np.ndarray:
+        """Return a clean copy of the frame with blur regions applied and nothing else.
+
+        No bounding boxes, no labels, no HUD — suitable for live preview.
+        """
+        canvas = frame.copy()
+        for det in frame_output.get("detections", []):
+            if det["role"] == "blur":
+                self._apply_blur(canvas, det["bbox"])
+        return canvas
+
     def render(self, frame: np.ndarray, frame_output: dict) -> np.ndarray:
         canvas = frame.copy()
         h, w = frame_output["frame_shape"]
@@ -130,3 +141,38 @@ class Renderer:
         frame[y1:y2, x1:x2] = cv2.GaussianBlur(
             roi, (self.blur_k, self.blur_k), 0
         )
+
+
+# ----------------------------------------------------------------------
+# Module-level helper (no Renderer instance needed)
+# ----------------------------------------------------------------------
+def render_detections_frame(frame: np.ndarray, detections: dict) -> np.ndarray:
+    """Draw raw YOLO bounding boxes and labels on a copy of the frame.
+
+    No blur is applied — this is the "detection-only" intermediate output.
+
+    Parameters
+    ----------
+    frame      : BGR uint8 numpy array (H x W x 3).
+    detections : dict returned by Detector.detect()  —
+                 keys are category names, values are lists of detection dicts
+                 each with "bbox", "label", and "confidence" keys.
+
+    Returns
+    -------
+    Annotated BGR frame copy.
+    """
+    canvas = frame.copy()
+    for items in detections.values():
+        for det in items:
+            x1, y1, x2, y2 = det["bbox"]
+            color = _COLORS.get(det["label"], _DEFAULT_COLOR)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+            tag = f"{det['label']} {det['confidence']:.2f}"
+            pos = (x1, max(y1 - 6, 14))
+            # Black outline for readability on any background
+            cv2.putText(canvas, tag, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 0, 0), 3)
+            cv2.putText(canvas, tag, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, color, 1)
+    return canvas

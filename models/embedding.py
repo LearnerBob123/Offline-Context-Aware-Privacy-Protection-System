@@ -51,11 +51,27 @@ class EmbeddingModule(BaseModule):
         return self._embed(pil)
 
     def embed_objects(self, frame: np.ndarray, detections: dict) -> dict:
-        """Attach 'visual_embedding' to each detection item in-place."""
+        """Attach 'visual_embedding' to each detection item using a single batched forward pass."""
+        # Collect all valid crops and their corresponding detection dicts
+        tensors = []
+        items = []
         for cat in detections.values():
             for item in cat:
                 pil = crop_and_convert(frame, item["bbox"])
                 if pil is None:
                     continue
-                item["visual_embedding"] = self._embed(pil)
+                tensors.append(self.preprocess(pil))
+                items.append(item)
+
+        if not tensors:
+            return detections
+
+        # Single batched inference — much faster than N individual forward passes
+        with torch.no_grad():
+            batch = torch.stack(tensors).to(self.device)       # (N, 3, 224, 224)
+            embeddings = self.model(batch).cpu().numpy()        # (N, D)
+
+        for item, emb in zip(items, embeddings):
+            item["visual_embedding"] = emb.flatten().tolist()
+
         return detections

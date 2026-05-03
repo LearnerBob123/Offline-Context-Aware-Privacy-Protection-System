@@ -1,0 +1,14 @@
+2026-05-04 00:30:48.082 Uvicorn server started on 0.0.0.0:8501
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://10.17.32.151:8501
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[ContextModule] Loading CLIP from HuggingFace: openai/clip-vit-base-patch32
+
+Loading weights:   0%|          | 0/398 [00:00<?, ?it/s]
+Loading weights:  27%|##6       | 107/398 [00:00<00:00, 1046.92it/s]
+Loading weights:  91%|#########1| 364/398 [00:00<00:00, 1932.80it/s]
+Loading weights: 100%|##########| 398/398 [00:00<00:00, 1793.77it/s]

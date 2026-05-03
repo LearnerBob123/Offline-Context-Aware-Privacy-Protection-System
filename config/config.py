@@ -11,7 +11,8 @@ from typing import List
 class PipelineConfig:
     # --- Model toggles ---
     USE_YOLO: bool = True
-    USE_VIT: bool = True
+    USE_VIT: bool = False    # ViT embeddings are stored in the log but NOT used for blur decisions;
+                             # disable by default for 7× speedup. Enable with --vit if needed.
     USE_CLIP: bool = True
     USE_SALIENCY: bool = False
 
@@ -27,16 +28,37 @@ class PipelineConfig:
     IMG_SIZE: int = 640
 
     # --- Embedding settings ---
-    FRAME_EMBED_INTERVAL: int = 10
+    FRAME_EMBED_INTERVAL: int = 10   # how often to compute full-frame ViT embedding
+    OBJECT_EMBED_INTERVAL: int = 10  # how often to compute per-object ViT embeddings (0 = every frame)
+    CLIP_INTERVAL: int = 15          # how often to run CLIP classify_scene (scene changes slowly)
     VIT_MODEL_NAME: str = "vit_base_patch16_224"
     CLIP_MODEL_NAME: str = "ViT-B/32"
 
     # --- CLIP context prompts ---
     CONTEXT_PROMPTS: List[str] = field(default_factory=lambda: [
-        "a meeting room",
-        "a presentation",
-        "a home environment",
-        "a public outdoor area",
+        # ── Meeting / office ──────────────────────────────────────────────
+        "a meeting room with people sitting at a table",
+        "a conference room with a presentation on screen",
+        # ── Home ─────────────────────────────────────────────────────────
+        "a home environment with people",
+        # ── Outdoor / street ─────────────────────────────────────────────
+        "a public outdoor area with pedestrians",
+        "a street or road with people walking",
+        # ── Medical ──────────────────────────────────────────────────────
+        "a hospital ward with nurses and patients",
+        "a medical operating room with surgeons",
+        "a doctor examining a patient in a clinic",
+        "a nurse attending to a patient in a hospital bed",
+        "a medical emergency room with healthcare workers",
+        # ── Classroom ────────────────────────────────────────────────────
+        "a classroom with a teacher and students",
+        "a university lecture hall with professor and audience",
+        # ── Retail ───────────────────────────────────────────────────────
+        "a retail store with customers and staff",
+        "a supermarket or shopping mall with shoppers",
+        # ── Traffic ──────────────────────────────────────────────────────
+        "a traffic scene with cars and pedestrians",
+        "a dashcam view of a highway or road",
     ])
 
     # --- Temporal smoothing ---
@@ -80,3 +102,15 @@ class PipelineConfig:
     # --- Video writer ---
     FALLBACK_FPS: float = 25.0
     VIDEO_CODEC: str = "mp4v"
+
+    # --- Parallelism ---
+    PARALLEL_YOLO: bool = False      # run 3 YOLO models concurrently (ThreadPoolExecutor)
+    FRAME_BUFFER_SIZE: int = 4       # depth of raw-read and display queues
+
+    # --- Intermediate outputs ---
+    SAVE_DET_VIDEO: bool = False                             # save bbox-only detection video
+    OUTPUT_DET_VIDEO: str = "outputs/output_detections.mp4" # path for detection video
+
+    # --- Streaming preview ---
+    PREVIEW: bool = False            # open cv2.imshow window (paced at native FPS)
+    PREVIEW_FPS: float = 15.0        # target FPS for live preview window (15 or 30)

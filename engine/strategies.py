@@ -223,21 +223,207 @@ class OutdoorStrategy(BaseDecisionStrategy):
 
 
 # ======================================================================
+# Medical / Clinical Strategy
+# ======================================================================
+
+class MedicalStrategy(BaseDecisionStrategy):
+    """
+    Clinical / hospital context.
+    All people (staff & patients) are blurred for patient privacy.
+    Screens (monitors showing data) are blurred.
+    """
+
+    def decide(self, detections: List[dict], frame_output: dict, config) -> None:
+        h, w = frame_output["frame_shape"]
+        cx, cy = w / 2.0, h / 2.0
+
+        for d in detections:
+            base = _base_importance(d, cx, cy)
+            boost = _saliency_boost(d, config.SAL_GAIN)
+            penalty = _saliency_penalty(d, config.SAL_PENALTY, config.MIN_SAL_OVERLAP)
+            score = base + boost + penalty
+            d["importance_score"] = round(score, 4)
+
+            trace = _init_trace(base, boost, penalty)
+            trace["rules_applied"].append("medical_context")
+            d["decision_trace"] = trace
+
+        # All persons / faces blurred in medical context
+        for d in detections:
+            if d["label"] in ("person", "face"):
+                d["role"] = "blur"
+                d["decision_trace"]["rules_applied"].append("medical_all_persons_blurred")
+            if d["label"] in ("laptop", "tv", "monitor", "cell phone"):
+                d["role"] = "blur"
+                d["decision_trace"]["rules_applied"].append("medical_screen_blurred")
+
+
+# ======================================================================
+# Classroom Strategy
+# ======================================================================
+
+class ClassroomStrategy(BaseDecisionStrategy):
+    """
+    Classroom / lecture context.
+    Presenter / teacher = main (front-most, largest, most central).
+    Students in background → blur if configured.
+    Screens kept visible (they show educational content).
+    """
+
+    def decide(self, detections: List[dict], frame_output: dict, config) -> None:
+        h, w = frame_output["frame_shape"]
+        cx, cy = w / 2.0, h / 2.0
+
+        for d in detections:
+            base = _base_importance(d, cx, cy)
+            # Presenter is usually lower in the frame (closer) → y-proximity bonus
+            _, by = d["center"]
+            front_bonus = (by / h) * d["area"] * 0.2
+            boost = _saliency_boost(d, config.SAL_GAIN)
+            penalty = _saliency_penalty(d, config.SAL_PENALTY, config.MIN_SAL_OVERLAP)
+            score = base + front_bonus + boost + penalty
+            d["importance_score"] = round(score, 4)
+
+            trace = _init_trace(base, boost, penalty)
+            trace["final_score"] = round(score, 4)
+            trace["rules_applied"].append("classroom_front_bonus")
+            d["decision_trace"] = trace
+
+        # Elect presenter (highest scorer among persons)
+        persons = [d for d in detections if d["label"] == "person"]
+        if persons:
+            presenter = max(persons, key=lambda d: d["importance_score"])
+            presenter["role"] = "main"
+            presenter["decision_trace"]["rules_applied"].append("selected_as_presenter")
+            for p in persons:
+                if p is not presenter:
+                    p["role"] = ("blur" if config.BLUR_BACKGROUND_PEOPLE
+                                 else "background")
+                    p["decision_trace"]["rules_applied"].append("blurred_as_student")
+
+        # Screens visible (educational content)
+        for d in detections:
+            if d["label"] in ("laptop", "tv", "monitor"):
+                d["role"] = "background"
+                d["decision_trace"]["rules_applied"].append("screen_kept_classroom")
+
+
+# ======================================================================
+# Street / Traffic Strategy
+# ======================================================================
+
+class TrafficStrategy(BaseDecisionStrategy):
+    """
+    Street / traffic / dashcam context.
+    Plates always blurred. Pedestrian faces blurred.
+    Vehicles are main objects; no single 'main person'.
+    """
+
+    VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle", "bicycle"}
+
+    def decide(self, detections: List[dict], frame_output: dict, config) -> None:
+        h, w = frame_output["frame_shape"]
+        cx, cy = w / 2.0, h / 2.0
+
+        for d in detections:
+            base = _base_importance(d, cx, cy)
+            boost = _saliency_boost(d, config.SAL_GAIN)
+            penalty = _saliency_penalty(d, config.SAL_PENALTY, config.MIN_SAL_OVERLAP)
+            score = base + boost + penalty
+            d["importance_score"] = round(score, 4)
+
+            trace = _init_trace(base, boost, penalty)
+            trace["rules_applied"].append("traffic_context")
+            d["decision_trace"] = trace
+
+        for d in detections:
+            if d["label"] in self.VEHICLE_LABELS:
+                d["role"] = "main"
+                d["decision_trace"]["rules_applied"].append("vehicle_is_main")
+            elif d["label"] in ("person", "face"):
+                d["role"] = "blur"
+                d["decision_trace"]["rules_applied"].append("pedestrian_blurred")
+            elif d["label"] == "license_plate":
+                d["role"] = "blur"
+                d["decision_trace"]["rules_applied"].append("plate_blurred_traffic")
+
+
+# ======================================================================
+# Retail / Store Strategy
+# ======================================================================
+
+class RetailStrategy(BaseDecisionStrategy):
+    """
+    Retail / store / shop context.
+    Customers are blurred (GDPR / CCTV privacy).
+    Staff (if identifiable via size/centrality heuristic) kept as main.
+    Shelves / products are background.
+    """
+
+    def decide(self, detections: List[dict], frame_output: dict, config) -> None:
+        h, w = frame_output["frame_shape"]
+        cx, cy = w / 2.0, h / 2.0
+
+        for d in detections:
+            base = _base_importance(d, cx, cy)
+            boost = _saliency_boost(d, config.SAL_GAIN)
+            penalty = _saliency_penalty(d, config.SAL_PENALTY, config.MIN_SAL_OVERLAP)
+            score = base + boost + penalty
+            d["importance_score"] = round(score, 4)
+
+            trace = _init_trace(base, boost, penalty)
+            trace["rules_applied"].append("retail_context")
+            d["decision_trace"] = trace
+
+        persons = [d for d in detections if d["label"] == "person"]
+        if persons:
+            # Heuristic: largest + most central = likely staff behind counter
+            staff = max(persons, key=lambda d: d["importance_score"])
+            staff["role"] = "main"
+            staff["decision_trace"]["rules_applied"].append("selected_as_staff")
+            for p in persons:
+                if p is not staff:
+                    p["role"] = "blur"
+                    p["decision_trace"]["rules_applied"].append("customer_blurred")
+
+        for d in detections:
+            if d["label"] in ("laptop", "tv", "monitor", "cell phone"):
+                d["role"] = "blur"
+                d["decision_trace"]["rules_applied"].append("pos_screen_blurred")
+
+
+# ======================================================================
 # Registry
 # ======================================================================
 
 _STRATEGIES = {
-    "meeting": MeetingStrategy,
-    "outdoor": OutdoorStrategy,
-    "default": DefaultStrategy,
+    "meeting":   MeetingStrategy,
+    "outdoor":   OutdoorStrategy,
+    "medical":   MedicalStrategy,
+    "classroom": ClassroomStrategy,
+    "traffic":   TrafficStrategy,
+    "retail":    RetailStrategy,
+    "default":   DefaultStrategy,
 }
 
 
 def get_strategy(context_label: str) -> BaseDecisionStrategy:
     """Select a strategy based on the CLIP scene label."""
     label = context_label.lower()
-    if "meeting" in label or "presentation" in label:
+    if any(k in label for k in ("meeting", "presentation", "conference")):
         return MeetingStrategy()
-    if "outdoor" in label or "street" in label or "park" in label:
+    if any(k in label for k in ("outdoor", "street", "park", "field", "garden", "pedestrian")):
         return OutdoorStrategy()
+    if any(k in label for k in (
+        "hospital", "clinic", "medical", "doctor", "operating",
+        "nurse", "patient", "surgeon", "ward", "emergency room",
+        "healthcare", "examining",
+    )):
+        return MedicalStrategy()
+    if any(k in label for k in ("classroom", "lecture", "school", "university", "auditorium", "teacher", "professor", "student")):
+        return ClassroomStrategy()
+    if any(k in label for k in ("traffic", "road", "highway", "dashcam", "driving", "parking")):
+        return TrafficStrategy()
+    if any(k in label for k in ("store", "shop", "retail", "supermarket", "mall", "market", "customer", "shopper")):
+        return RetailStrategy()
     return DefaultStrategy()

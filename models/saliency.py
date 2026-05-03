@@ -65,8 +65,18 @@ class U2NetSaliency:
         from model import U2NETP  # type: ignore
 
         self.net = U2NETP(3, 1)
-        ckpt_path = os.path.join(repo, "saved_models", "u2netp.pth")
-        checkpoint = torch.load(ckpt_path, map_location=self.device)
+        # Search common checkpoint locations
+        candidates = [
+            os.path.join(repo, "saved_models", "u2netp", "u2netp.pth"),
+            os.path.join(repo, "saved_models", "u2netp.pth"),
+            os.path.join(repo, "saved_models", "face_detection_cv2", "u2netp.pth"),
+        ]
+        ckpt_path = next((p for p in candidates if os.path.isfile(p)), None)
+        if ckpt_path is None:
+            raise FileNotFoundError(
+                f"u2netp.pth not found. Searched:\n  " + "\n  ".join(candidates)
+            )
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=True)
         self.net.load_state_dict(checkpoint)
         self.net.to(self.device).eval()
 

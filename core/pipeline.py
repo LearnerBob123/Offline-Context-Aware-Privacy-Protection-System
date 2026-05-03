@@ -1,10 +1,25 @@
 """
 Central pipeline – orchestrates all modules in a config-driven,
 streaming-safe, memory-efficient loop.
+
+Threading model
+---------------
+Three threads run concurrently inside Pipeline.run():
+
+  Thread A  [FrameReader]  – decodes raw frames into raw_queue.
+  Thread B  [ML Worker]    – this thread; pops raw frames, runs all
+                             inference + decision stages, pushes results
+                             to display_queue.
+  Thread C  [FrameWriter]  – drains display_queue, writes VideoWriter(s),
+                             and optionally shows a paced preview window.
+
+The two bounded queues provide natural back-pressure so memory use stays
+flat regardless of video length.
 """
 
 from config.config import PipelineConfig
 from core.video_processor import VideoReader, VideoWriter
+from core.frame_buffer import FrameBuffer
 from models.detector import Detector
 from models.embedding import EmbeddingModule
 from models.context import ContextModule
@@ -13,7 +28,7 @@ from engine.feature_engine import FeatureEngine
 from engine.decision_engine import DecisionEngine
 from engine.temporal import TemporalSmoother
 from utils.io import JSONLLogger
-from utils.visualization import Renderer
+from utils.visualization import Renderer, render_detections_frame
 
 
 class Pipeline:
@@ -38,8 +53,10 @@ class Pipeline:
         self.decision_engine = DecisionEngine(config)
         self.temporal = TemporalSmoother(buffer_size=config.TEMPORAL_BUFFER_SIZE)
 
-        # Renderer (needed for main video or saliency heatmap)
-        self.renderer = Renderer(config) if (config.ENABLE_RENDER or config.ENABLE_SALIENCY_RENDER) else None
+        # Renderer (needed for main video, saliency heatmap, or live preview)
+        self.renderer = Renderer(config) if (
+            config.ENABLE_RENDER or config.ENABLE_SALIENCY_RENDER or config.PREVIEW
+        ) else None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -75,7 +92,7 @@ class Pipeline:
     # Main loop
     # ------------------------------------------------------------------
     def run(self, input_path: str | None = None, output_path: str | None = None) -> None:
-        input_path = input_path or self.cfg.INPUT_VIDEO
+        input_path  = input_path  or self.cfg.INPUT_VIDEO
         output_path = output_path or self.cfg.OUTPUT_VIDEO
 
         # --- Open video ---
@@ -87,7 +104,7 @@ class Pipeline:
         # --- Initialise models ---
         self._init_modules()
 
-        # --- Writer / Logger ---
+        # --- Build writers ---
         writer = None
         if self.cfg.ENABLE_RENDER:
             writer = VideoWriter(output_path, reader.fps,
@@ -98,16 +115,35 @@ class Pipeline:
             sal_writer = VideoWriter(self.cfg.OUTPUT_SALIENCY_VIDEO, reader.fps,
                                      reader.width, reader.height, self.cfg)
 
+        det_writer = None
+        if self.cfg.SAVE_DET_VIDEO:
+            det_writer = VideoWriter(self.cfg.OUTPUT_DET_VIDEO, reader.fps,
+                                     reader.width, reader.height, self.cfg)
+
         logger = None
         if self.cfg.SAVE_JSON:
             logger = JSONLLogger(self.cfg.OUTPUT_LOG)
 
+        # --- Start producer-consumer threads ---
+        buf = FrameBuffer(reader, self.cfg.FRAME_BUFFER_SIZE, reader.fps)
+        buf.start_reader_thread()
+        buf.start_writer_thread(
+            writer=writer,
+            sal_writer=sal_writer,
+            det_writer=det_writer,
+            preview=self.cfg.PREVIEW,
+            preview_fps=self.cfg.PREVIEW_FPS,
+        )
+
         frame_id = 0
         try:
             while True:
-                ret, frame = reader.read()
-                if not ret:
+                # Thread B: pop next raw frame (blocks if reader is behind)
+                item = buf.get_frame()
+                if item is None:                       # EOF sentinel
                     break
+                _, frame = item
+
                 if self.cfg.MAX_FRAMES and frame_id >= self.cfg.MAX_FRAMES:
                     break
 
@@ -118,8 +154,14 @@ class Pipeline:
                 if self.detector:
                     detections = self.detector.detect(frame)
 
-                # 2. Object-level embeddings (ViT)
-                if self.embedder:
+                # 1b. Detection-only intermediate frame (raw frame + bboxes, no blur)
+                det_frame = None
+                if det_writer is not None:
+                    det_frame = render_detections_frame(frame, detections)
+
+                # 2. Object-level embeddings (ViT, batched — sampled at interval)
+                obj_interval = self.cfg.OBJECT_EMBED_INTERVAL or 1
+                if self.embedder and frame_id % obj_interval == 0:
                     detections = self.embedder.embed_objects(frame, detections)
 
                 # 3. Frame-level embedding (ViT, at interval)
@@ -127,13 +169,13 @@ class Pipeline:
                 if self.embedder and frame_id % self.cfg.FRAME_EMBED_INTERVAL == 0:
                     frame_emb = self.embedder.embed_frame(frame)
 
-                # 4. Scene context (CLIP)
-                clip_emb = None
-                scene_ctx = None
-                if self.context:
-                    scene_ctx = self.context.classify_scene(frame)
+                # 4. Scene context (CLIP — sampled at interval, cached between runs)
+                clip_emb  = None
+                if self.context and frame_id % self.cfg.CLIP_INTERVAL == 0:
+                    self._last_scene_ctx = self.context.classify_scene(frame)
                     if frame_id % self.cfg.FRAME_EMBED_INTERVAL == 0:
                         clip_emb = self.context.embed_image(frame)
+                scene_ctx = getattr(self, '_last_scene_ctx', None)
 
                 # 5. Saliency (optional, reuse last map between intervals)
                 if self.saliency and frame_id % self.cfg.SALIENCY_INTERVAL == 0:
@@ -158,17 +200,23 @@ class Pipeline:
                 # 8. Temporal smoothing
                 frame_output = self.temporal.update(frame_output)
 
-                # 9. Render annotated frame
+                # 9a. Render blurred/annotated frame (for file output)
+                annotated = None
                 if self.renderer and writer:
                     annotated = self.renderer.render(frame, frame_output)
-                    writer.write(annotated)
 
-                # 9b. Pure saliency heatmap video
+                # 9b. Saliency heatmap frame
+                sal_frame = None
                 if self.renderer and sal_writer:
-                    sal_frame = self.renderer.render_saliency_heatmap(
-                        frame, sal_map,
-                    )
-                    sal_writer.write(sal_frame)
+                    sal_frame = self.renderer.render_saliency_heatmap(frame, sal_map)
+
+                # 9c. Blur-only preview frame (no boxes, no labels)
+                preview_frame = None
+                if self.cfg.PREVIEW and self.renderer:
+                    preview_frame = self.renderer.render_blur_only(frame, frame_output)
+
+                # Push all channels to writer thread
+                buf.put_frame(frame_id, annotated, sal_frame, det_frame, preview_frame)
 
                 # 10. Stream-write log (JSONL)
                 if logger:
@@ -179,20 +227,28 @@ class Pipeline:
                     print(f"  Processed {frame_id} frames …")
 
         finally:
-            # Guaranteed cleanup
+            # Signal writer thread that no more frames are coming, then wait
+            buf.signal_done()
+            buf.stop()
+
+            # Release I/O handles
             reader.release()
             if writer:
                 writer.release()
             if sal_writer:
                 sal_writer.release()
+            if det_writer:
+                det_writer.release()
             if logger:
                 logger.close()
             self._release_modules()
 
         print(f"[Pipeline] Done – {frame_id} frames processed.")
         if self.cfg.SAVE_JSON:
-            print(f"  Log  → {self.cfg.OUTPUT_LOG}")
+            print(f"  Log        → {self.cfg.OUTPUT_LOG}")
         if self.cfg.ENABLE_RENDER:
-            print(f"  Video → {output_path}")
+            print(f"  Video      → {output_path}")
         if sal_writer:
-            print(f"  Saliency → {self.cfg.OUTPUT_SALIENCY_VIDEO}")
+            print(f"  Saliency   → {self.cfg.OUTPUT_SALIENCY_VIDEO}")
+        if det_writer:
+            print(f"  Detections → {self.cfg.OUTPUT_DET_VIDEO}")
